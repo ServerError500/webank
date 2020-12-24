@@ -1,0 +1,417 @@
+#include "tools.h"
+#include <stdio.h>
+#include "bank.h"
+#include<signal.h>
+#define BUF_SIZE (4096)
+void open_acc();
+void login();
+void destory();
+void unlock();
+void save();
+void transfer();
+void repass();
+void take();
+void query();
+
+
+int bank_id=1001;
+int svr_fd;
+
+
+//ctrl c杀死进程
+void sigint (int signum)
+{
+	close(svr_fd);
+	printf("关闭");
+	exit(0);
+}
+//打印所有信息（用于查找bug）
+void show(Account*acc)
+{
+	printf("%d %s %s %s %f %d\n",acc->operate,acc->bank,acc->card,acc->pass,acc->balance,acc->islock);
+}
+
+void * server(void* arg)
+{
+	int cli_fd=*(int *) arg;
+	Account* acc=malloc(sizeof(Account));
+	for(;;)
+	{
+		char buf[4096];
+		int recv_size=read(cli_fd,buf,BUF_SIZE);
+		if(0 >= recv_size )
+		{
+			printf("客户端%d退出\n",cli_fd);
+			close(cli_fd);
+			pthread_exit(NULL);
+		}
+		sscanf(buf,"%d %s %s %s %f %d",&acc->operate,acc->bank,acc->card,acc->pass,&acc->balance,&acc->islock);
+		switch(acc->operate)
+		{
+			case M_OPEN:open_acc(acc,buf);break;		//开户
+			case M_LOGIN:login(acc,buf);break;			//登录
+			case M_DESTORY:destory(acc,buf);break;		//销户
+			case M_UNLOCK:unlock(acc,buf);break;		//解锁
+			case M_SAVE:save(acc,buf);break;			//存钱
+			case M_TAKE:take(acc,buf);break;			//取款
+			case M_QUERY:query(acc,buf);break;			//查询
+			case M_TRANSFER:transfer(acc,buf);break;	//转账
+			case M_REPASS:repass(acc,buf);	break;		//改密码
+		}
+		write(cli_fd,buf,strlen(buf)+1);
+	}
+}
+
+//开户
+void open_acc(Account * acc,char * buf)
+{
+	puts("用户正在开户");
+	sprintf(acc->bank,"201702%d",bank_id);
+	sprintf(acc->pass,"123456");
+	acc->islock=0;
+	char path[256];
+	sprintf(path,"acc/%s",acc->bank);
+	int fd = open(path,O_WRONLY|O_CREAT|O_EXCL,0644);
+	if(0>fd)
+	{
+		error("open");
+		sprintf(buf,"N:服务器正在升级请稍后");
+		return;
+	}
+	sprintf(buf,"Y:开户成功，卡号:%s 密码:%s",acc->bank,acc->pass);
+	bank_id++;
+	write(fd,acc,sizeof(Account));
+	close(fd);
+}
+//登录
+void login(Account * acc,char * buf)
+{
+	puts("用户正在登录");
+	char path[256] = {};
+	sprintf(path,"acc/%s",acc->bank);
+	// 判断银行卡号是否正确
+	if(0 != access(path,F_OK))
+	{
+		sprintf(buf,"N:卡号不存在，请检查!");
+		return;
+	}
+	
+	int fd = open(path,O_RDWR);
+	if(0 > fd)
+	{
+		error("open");
+		sprintf(buf,"N:服务器正在升级，登陆失败!");
+		return;
+	}
+	//读取文件内容
+	Account bcc = {};
+	read(fd,&bcc,sizeof(Account));
+	
+	//判断此帐号是否被锁定
+	if(bcc.islock >= 3)
+	{
+		sprintf(buf,"N:此账号已经锁定，请解锁!");
+		return;
+	}
+	
+	if(strcmp(acc->pass,bcc.pass))
+	{
+		bcc.islock++;
+		sprintf(buf,"N:密码错误，重新登陆（您还有%d次机会）!",3-bcc.islock);
+		if(bcc.islock >= 3)
+		{
+			sprintf(buf,"N:此账号已经锁定，请解锁!");
+		}
+	}
+	else
+	{
+		bcc.islock = 0;
+		sprintf(buf,"Y:恭喜您登陆成功!");
+	}
+	lseek(fd,0,SEEK_SET);
+	write(fd,&bcc,sizeof(Account));
+	close(fd);
+}
+//销户
+void destory(Account * acc,char * buf)
+{
+	char path[256] = {};
+	sprintf(path,"acc/%s",acc->bank);
+	// 判断银行卡号是否正确
+	if(0 != access(path,F_OK))
+	{
+		puts("此卡号不存在");
+		sprintf(buf,"N:卡号不存在，请检查!");
+		return;
+	}
+	
+	int fd = open(path,O_RDWR);
+	if(0 > fd)
+	{
+		error("open");
+		sprintf(buf,"N:服务器正在升级，销户失败");
+		return;
+	}
+	
+	Account bcc = {};
+	read(fd,&bcc,sizeof(Account));
+	close(fd);
+	
+	if(strcmp(bcc.card,acc->card))
+	{
+		sprintf(buf,"N:身份证号不正确，销户失败!");
+		return;
+	}
+	
+	if(strcmp(bcc.pass,acc->pass))
+	{
+		sprintf(buf,"N:密码不正确，销户失败!");
+		return;
+	}
+	
+	if(remove(path))
+	{
+		error("remove");
+		sprintf(buf,"N:服务器正在升级，销户失败!");
+		return;
+	}
+	
+	sprintf(buf,"Y:销户成功，期待下次与你相遇!");
+}
+//解锁
+void unlock(Account * acc,char * buf)
+{
+	char path[256] = {};
+	sprintf(path,"acc/%s",acc->bank);
+	// 判断银行卡号是否正确
+	if(0 != access(path,F_OK))
+	{
+		sprintf(buf,"N:卡号不存在，请检查!");
+		return;
+	}
+	
+	int fd = open(path,O_RDWR);
+	if(0 > fd)
+	{
+		error("open");
+		sprintf(buf,"N:服务器正在升级，解锁失败!");
+		return;
+	}
+	
+	Account bcc = {};
+	read(fd,&bcc,sizeof(Account));
+	if(strcmp(bcc.card,acc->card))
+	{
+		sprintf(buf,"N:身份证号不正确，解锁失败!");
+		return;
+	}
+	
+	if(strcmp(bcc.pass,acc->pass))
+	{
+		sprintf(buf,"N:密码不正确，解锁失败!");
+		return;
+	}
+	
+	bcc.islock = 0;
+	lseek(fd,0,SEEK_SET);
+	write(fd,&bcc,sizeof(Account));
+	close(fd);
+	
+	sprintf(buf,"N:解锁成功!");
+}
+
+//存款
+void save(Account* acc,char* buf)
+{
+	char path[256] = {};
+	sprintf(path,"acc/%s",acc->bank);
+	
+	int fd = open(path,O_RDWR);
+	if(0 > fd)
+	{
+		error("open");
+		sprintf(buf,"N:服务器正在升级，存款失败!");
+		return;
+	}
+	
+	Account bcc = {};
+	read(fd,&bcc,sizeof(Account));
+
+	bcc.balance += acc->balance;
+	lseek(fd,0,SEEK_SET);
+	write(fd,&bcc,sizeof(Account));
+	close(fd);
+	
+	sprintf(buf,"N:存款成功，当前余额为:%g!",bcc.balance);
+}
+
+//取款
+void take(Account* acc,char * buf)
+{
+	char path[256] = {};
+	sprintf(path,"acc/%s",acc->bank);
+	
+	int fd = open(path,O_RDWR);
+	if(0 > fd)
+	{
+		error("open");
+		sprintf(buf,"N:服务器正在升级，取款失败!");
+		return;
+	}
+	
+	Account bcc = {};
+	read(fd,&bcc,sizeof(Account));
+
+	if(bcc.balance <  acc->balance)
+	{
+		sprintf(buf,"N:余额不足，取款失败。当前余额为:%g!",bcc.balance);
+		return;
+	}
+
+	bcc.balance -= acc->balance;
+	lseek(fd,0,SEEK_SET);
+	write(fd,&bcc,sizeof(Account));
+	close(fd);
+	
+	sprintf(buf,"N:取款成功，当前余额为:%g!",bcc.balance);
+}
+//转账
+void transfer(Account* acc,char* buf)
+{
+	char src_path[256] = {} , dest_path[256];
+	
+	sprintf(src_path,"acc/%s",acc->bank);
+	sprintf(dest_path,"acc/%s",acc->card);
+	
+	// 判断银行卡号是否正确
+	if(0 != access(dest_path,F_OK))
+	{
+		sprintf(buf,"N:目标卡号不存在，请检查!");
+		return;
+	}
+	
+	int src_fd = open(src_path,O_RDWR);
+	int dest_fd = open(dest_path,O_RDWR);
+	if(0 > src_fd || 0 > dest_fd)
+	{
+		error("open");
+		sprintf(buf,"N:服务器正在升级，转账失败");
+		return;
+	}
+	
+	
+	
+	Account src_acc = {} , dest_acc = {};
+	read(src_fd,&src_acc,sizeof(Account));
+	read(dest_fd,&dest_acc,sizeof(Account));
+
+	if(src_acc.balance <  acc->balance)
+	{
+		sprintf(buf,"N:余额不足，转账失败。当前余额为:%g!",src_acc.balance);
+		return;
+	}
+
+	src_acc.balance -= acc->balance;
+	dest_acc.balance += acc->balance;
+	
+	
+	lseek(src_fd,0,SEEK_SET);
+	lseek(dest_fd,0,SEEK_SET);
+	write(src_fd,&src_acc,sizeof(Account));
+	write(dest_fd,&dest_acc,sizeof(Account));
+	close(src_fd);
+	close(dest_fd);
+	
+	sprintf(buf,"Y:转账成功，当前余额为:%g!",src_acc.balance);
+}
+
+//改密码
+void repass(Account* acc,char* buf)
+{
+	char path[256] = {};
+	sprintf(path,"acc/%s",acc->bank);
+	
+	int fd = open(path,O_WRONLY);
+	if(0 > fd)
+	{
+		error("open");
+		sprintf(buf,"N:服务器正在升级，查询失败!");
+		return;
+	}
+	
+	Account bcc = {};
+	read(fd,&bcc,sizeof(Account));
+	strcpy(bcc.pass,acc->pass);
+	write(fd,&bcc,sizeof(Account));
+	
+	sprintf(buf,"N:修改密码成功!");
+}
+//查询
+void query(Account* acc,char* buf)
+{
+	char path[256] = {};
+	sprintf(path,"%s",acc->bank);
+	
+	int fd = open(path,O_RDONLY);
+	if(0 > fd)
+	{
+		error("open");
+		sprintf(buf,"N:服务器正在升级，查询失败!");
+		return;
+	}
+	
+	Account bcc = {};
+	read(fd,&bcc,sizeof(Account));
+	close(fd);
+	
+	sprintf(buf,"N:查询成功，当前余额为:%g!",bcc.balance);
+}
+
+
+int main()
+{
+	signal(SIGINT,sigint);
+	//printf("创建socket对象...\n");
+	svr_fd = socket(AF_INET,SOCK_STREAM,0);
+	if(0 > svr_fd)
+	{
+		perror("socket");
+		return -1;
+	}
+	
+	//准备通信地址(自己)
+	//printf("准备通信地址...\n");
+	struct sockaddr_in addr = {};
+	addr.sin_family = AF_INET;
+	addr.sin_port = htons(6789);
+	addr.sin_addr.s_addr = inet_addr("10.0.2.15");
+	socklen_t addrlen = sizeof(addr);
+	
+	//绑定socket对象与地址
+	//printf("绑定socket对象与地址...\n");
+	if(bind(svr_fd,(struct sockaddr*)&addr,addrlen))
+	{
+		perror("bind");
+		return -1;
+	}
+	
+	//设置监听和排除数量
+	//printf("设置监听");
+	if(listen(svr_fd,10))
+	{
+		perror("listen");
+		return -1;
+	}
+	puts("连接成功接受就绪");
+	for(;;)
+	{
+		int cli_fd = accept(svr_fd,(struct sockaddr*)&addr,&addrlen);
+		if(0 > cli_fd)
+		{
+			perror("accept");
+			return -1;
+		}
+		pthread_t tid;
+		pthread_create(&tid,NULL,server,&cli_fd);
+	}
+}
